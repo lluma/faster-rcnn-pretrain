@@ -15,6 +15,7 @@ from datasets.pascal_voc import pascal_voc
 from datasets.coco import coco
 from datasets.imagenet import imagenet
 from datasets.vg import vg
+from datasets.ocid import ocid
 
 import numpy as np
 
@@ -59,6 +60,12 @@ for split in ['train', 'val', 'val1', 'val2', 'test']:
     data_path = 'data/imagenet/ILSVRC'
     __sets[name] = (lambda split=split, devkit_path=devkit_path, data_path=data_path: imagenet(split,devkit_path,data_path))
 
+# set up ocid
+for split in ['train', 'test']:
+    name = 'ocid_{}'.format(split)
+    data_path = None
+    __sets[name] = (lambda split=split, data_path=data_path: ocid(split, data_path))
+    
 def get_imdb(name):
   """Get an imdb (image database) by name."""
   if name not in __sets:
