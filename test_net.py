@@ -15,8 +15,9 @@ import argparse
 import pprint
 import pdb
 import time
-
+import h5py
 import cv2
+import pickle
 
 import torch
 from torch.autograd import Variable
@@ -87,6 +88,13 @@ def parse_args():
   parser.add_argument('--vis', dest='vis',
                       help='visualization mode',
                       action='store_true')
+  ### inference all
+  parser.add_argument('--all', dest='all',
+                      help='use whole dataset to test',
+                      action='store_true')
+  parser.add_argument('--output_layer', dest='output_layer',
+                      help='store the feature maps from the certain layer in the model',
+                      action='store_true')
   args = parser.parse_args()
   return args
 
@@ -127,7 +135,10 @@ if __name__ == '__main__':
       args.set_cfgs = ['ANCHOR_SCALES', '[4, 8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "ocid":
       args.imdb_name = "ocid_train"
-      args.imdbval_name = "ocid_test"
+      if args.all:
+        args.imdbval_name = "ocid_all"
+      else:
+        args.imdbval_name = "ocid_test"
       args.set_cfgs = ['ANCHOR_SCALES', '[8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   else:
       print ('Dataset %s is not existed!' % (args.dataset))
@@ -158,8 +169,10 @@ if __name__ == '__main__':
   # initilize the network here.
   if args.net == 'vgg16':
     fasterRCNN = vgg16(imdb.classes, pretrained=False, class_agnostic=args.class_agnostic)
+    output_feature_size = 4096
   elif args.net == 'res101':
     fasterRCNN = resnet(imdb.classes, 101, pretrained=False, class_agnostic=args.class_agnostic)
+    output_feature_size = 2048
   elif args.net == 'res50':
     fasterRCNN = resnet(imdb.classes, 50, pretrained=False, class_agnostic=args.class_agnostic)
   elif args.net == 'res152':
@@ -211,8 +224,13 @@ if __name__ == '__main__':
   if vis:
     thresh = 0.05
   else:
-    thresh = 0.0
-
+    thresh = 0.65
+    
+  if args.output_layer:
+    cfg.output_layer = True
+  else:
+    cfg.output_layer = False
+    
   save_name = 'faster_rcnn_10'
   num_images = len(imdb.image_index)
   all_boxes = [[[] for _ in xrange(num_images)]
@@ -232,6 +250,9 @@ if __name__ == '__main__':
 
   fasterRCNN.eval()
   empty_array = np.transpose(np.array([[],[],[],[],[]]), (1,0))
+  temp_output_feat = np.zeros([num_images, 300, output_feature_size])
+  temp_output_pred_boxes = {}
+    
   for i in range(num_images):
 
       data = next(data_iter)
@@ -245,8 +266,11 @@ if __name__ == '__main__':
       rois, cls_prob, bbox_pred, \
       rpn_loss_cls, rpn_loss_box, \
       RCNN_loss_cls, RCNN_loss_bbox, \
-      rois_label = fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
+      rois_label, output_pooled_feat = fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
 
+      if cfg.output_layer:
+          temp_output_feat[i,:,:] = output_pooled_feat.detach().cpu().numpy()
+      
       scores = cls_prob.data
       boxes = rois.data[:, :, 1:5]
 
@@ -272,6 +296,7 @@ if __name__ == '__main__':
 
       pred_boxes /= data[1][0][2].item()
 
+      temp_pred_boxes = []
       scores = scores.squeeze()
       pred_boxes = pred_boxes.squeeze()
       det_toc = time.time()
@@ -297,11 +322,25 @@ if __name__ == '__main__':
             keep = nms(cls_boxes[order, :], cls_scores[order], cfg.TEST.NMS)
             cls_dets = cls_dets[keep.view(-1).long()]
             if vis:
-              im2show = vis_detections(im2show, imdb.classes[j], cls_dets.cpu().numpy(), 0.3)
+              im2show = vis_detections(im2show, imdb.classes[j], cls_dets.cpu().numpy(), thresh=0.65)
             all_boxes[j][i] = cls_dets.cpu().numpy()
+            
+            dets = cls_dets.cpu().numpy()
+            for k in range(np.minimum(10, dets.shape[0])):
+              bbox = tuple(int(np.round(x)) for x in dets[k, :4])
+              score = dets[k, -1]
+              if score > 0.3:
+                temp_pred_boxes.append([bbox, imdb._classes[j]])
           else:
             all_boxes[j][i] = empty_array
 
+
+      # temp_pred_boxes = [ [box, imdb._classes[j]] for box in all_boxes[j][i] for j in xrange(1, imdb.num_classes)]
+      # print('num_pred_boxes:', len(temp_pred_boxes), ' || ')
+      # print('pred_boxes:', temp_pred_boxes)
+      if cfg.output_layer:
+          temp_output_pred_boxes[i] = temp_pred_boxes 
+            
       # Limit to max_per_image detections *over all classes*
       if max_per_image > 0:
           image_scores = np.hstack([all_boxes[j][i][:, -1]
@@ -333,3 +372,16 @@ if __name__ == '__main__':
 
   end = time.time()
   print("test time: %0.4fs" % (end - start))
+  
+  if cfg.output_layer:
+    with h5py.File("%s_feat.hdf5" % (args.net), "w") as f:
+      dataset = f.create_dataset('feature', data=temp_output_feat, maxshape=(num_images, 300, output_feature_size), chunks=True)
+      f.close()
+      print("backbone %s feature is saved" % (args.net))
+
+    with open('%s_pred_boxes.pkl' % (args.net), 'wb') as f:
+      pickle.dump(temp_output_pred_boxes, f, pickle.HIGHEST_PROTOCOL)
+      f.close()
+      print("backbone %s predicted boxes is saved" % (args.net))
+    
+  

@@ -15,6 +15,9 @@ models/
 output/
 *_report.csv
 result.png
+*_feat.hdf5
+*_pred_boxes.pkl
+
 
 ## PyTorch
 
